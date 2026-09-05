@@ -47,11 +47,9 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
   const [pointerLocked, setPointerLocked] = useState(false);
   const [finishToast, setFinishToast] = useState<{ team: string; time: number; color: string } | null>(null);
   const [myFinish, setMyFinish] = useState<number | null>(null);
+  const [myId, setMyId] = useState("");
 
-  const me = useMemo(() => {
-    const pid = netRef.current?.myId;
-    return room?.players.find((p) => p.id === pid) ?? null;
-  }, [room]);
+  const me = useMemo(() => room?.players.find((p) => p.id === myId) ?? null, [room, myId]);
   const myTeam = useMemo(() => room?.teams.find((t) => t.id === me?.teamId) ?? null, [room, me]);
   const isLeader = !!room && !!me && room.leaderId === me.id;
   const isHost = !!myTeam && !!me && myTeam.hostId === me.id;
@@ -103,7 +101,10 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
         setFinishToast({ team: teamName, time: timeMs, color: t?.color ?? "#fff" });
         setTimeout(() => setFinishToast(null), 3500);
       },
-      onConnectionChange: (ok) => setConnErr(!ok),
+      onConnectionChange: (ok) => {
+        setConnErr(!ok);
+        if (ok) setMyId(net.myId);
+      },
       onScores: (rows) => setLeaderboard(rows),
     });
     net.connect();
@@ -173,6 +174,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
   }, [room, me, myTeam, addToast]);
 
   // ---------- react to room changes ----------
+  /* eslint-disable react-hooks/set-state-in-effect -- SpacetimeDB phase changes intentionally synchronize engine and UI state. */
   useEffect(() => {
     const g = gameRef.current;
     if (!g || !room || !me || !myTeam) return;
@@ -208,7 +210,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
         }
         ensureAudio();
         const net = netRef.current!;
-        const startAt = room.startAt ?? Date.now() + 4000;
+        const startAt = room.startAt ?? net.serverNow() + 4000;
         const tick = () => {
           const remaining = startAt - net.serverNow();
           if (remaining <= 0) {
@@ -241,6 +243,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
     }
     if (room.phase === "countdown" || room.phase === "playing") roundRef.current = room.round;
   }, [room, me, myTeam, gameReady, ensureAudio]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ---------- input loop ----------
   useEffect(() => {
@@ -326,21 +329,21 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
       )}
 
       {/* Top bar */}
-      <div className="pointer-events-none absolute top-0 left-0 right-0 z-20 flex items-start justify-between p-4">
-        <div className="pointer-events-auto flex items-center gap-3">
-          <Link href="/" className="rounded-xl bg-black/40 backdrop-blur px-3 py-2 text-sm font-bold hover:bg-black/60">
+      <div className="pointer-events-none absolute top-0 left-0 right-0 z-20 flex items-start justify-between p-2 sm:p-4">
+        <div className="pointer-events-auto flex items-center gap-1.5 sm:gap-3">
+          <Link href="/" className="rounded-xl bg-black/40 px-2 py-2 text-xs font-bold backdrop-blur hover:bg-black/60 sm:px-3 sm:text-sm">
             ← Lobby
           </Link>
-          <div className="rounded-xl bg-black/40 backdrop-blur px-3 py-2 text-sm">
+          <div className="rounded-xl bg-black/40 px-2 py-2 text-xs backdrop-blur sm:px-3 sm:text-sm">
             Room <span className="font-black tracking-widest text-[#ffd23f]">{code}</span>
           </div>
         </div>
         {/* Timer */}
         {phase !== "lobby" && (
-          <div className="flex flex-col items-center">
-            <div className="rounded-2xl bg-black/50 backdrop-blur px-6 py-2 text-center shadow-lg">
-              <div className="font-mono text-4xl font-black tabular-nums tracking-tight">{formatTime((myFinish ?? (hud?.timer ?? 0) * 1000) || 0)}</div>
-              <div className="text-xs uppercase tracking-widest text-white/70">
+          <div className="absolute left-1/2 top-14 flex -translate-x-1/2 flex-col items-center sm:static sm:translate-x-0">
+            <div className="max-w-[min(240px,calc(100vw-7rem))] rounded-xl bg-black/50 px-3 py-1 text-center shadow-lg backdrop-blur sm:max-w-none sm:rounded-2xl sm:px-6 sm:py-2">
+              <div className="font-mono text-2xl font-black tabular-nums tracking-tight sm:text-4xl">{formatTime((myFinish ?? (hud?.timer ?? 0) * 1000) || 0)}</div>
+              <div className="max-w-[220px] truncate text-[9px] uppercase tracking-wider text-white/70 sm:max-w-none sm:text-xs sm:tracking-widest">
                 {challenge.icon} {level?.objective}
                 {hud && hud.scoreTarget > 0 ? ` · ${hud.score}/${hud.scoreTarget}` : ""}
               </div>
@@ -348,7 +351,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
           </div>
         )}
         <div className="pointer-events-auto flex items-center gap-2">
-          <button onClick={() => setMuted((m) => !m)} className="rounded-xl bg-black/40 backdrop-blur px-3 py-2 text-sm font-bold hover:bg-black/60">
+          <button onClick={() => setMuted((m) => !m)} className="rounded-xl bg-black/40 px-2.5 py-2 text-xs font-bold backdrop-blur hover:bg-black/60 sm:px-3 sm:text-sm">
             {muted ? "🔇" : "🔊"}
           </button>
         </div>
@@ -356,7 +359,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
 
       {/* Team status (right side) */}
       {room && phase !== "lobby" && (
-        <div className="pointer-events-none absolute right-4 top-20 z-20 flex flex-col gap-2">
+        <div className="pointer-events-none absolute right-2 top-28 z-20 flex flex-col gap-2 sm:right-4 sm:top-20">
           {sortedTeams.map((t) => (
             <div key={t.id} className="flex items-center gap-2 rounded-xl bg-black/40 backdrop-blur px-3 py-1.5 text-sm">
               <span className="h-3 w-3 rounded-full" style={{ background: t.color }} />

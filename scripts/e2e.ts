@@ -10,7 +10,7 @@
 import { DbConnection, type EventContext } from "../src/module_bindings/index.js";
 
 const URI = process.env.STDB_URI ?? "ws://127.0.0.1:3007";
-const DB = process.env.STDB_DB ?? "singularity2";
+const DB = process.env.STDB_DB ?? "singularity2-sankalphs";
 const CODE = "TEST";
 
 let failures = 0;

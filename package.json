@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "spacetime:generate": "spacetime generate --lang typescript --out-dir src/module_bindings --module-path server",
     "spacetime:publish:local": "spacetime publish --module-path server --server local",
-    "spacetime:publish": "spacetime publish --module-path server --server maincloud"
+    "spacetime:publish": "spacetime publish singularity2-sankalphs --module-path server --server maincloud --delete-data=never"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",
@@ -20,6 +20,7 @@
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6",
+    "server-only": "^0.0.1",
     "spacetimedb": "2.10.*",
     "three": "^0.185.1"
   },

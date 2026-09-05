@@ -48,6 +48,7 @@ import SetReadyReducer from "./set_ready_reducer";
 import SetRoleReducer from "./set_role_reducer";
 import SetSquadReducer from "./set_squad_reducer";
 import StartRoundReducer from "./start_round_reducer";
+import SubmitFeedbackReducer from "./submit_feedback_reducer";
 
 // Import all procedure arg schemas
 
@@ -189,6 +190,7 @@ const reducersSchema = __reducers(
   __reducerSchema("set_role", SetRoleReducer),
   __reducerSchema("set_squad", SetSquadReducer),
   __reducerSchema("start_round", StartRoundReducer),
+  __reducerSchema("submit_feedback", SubmitFeedbackReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

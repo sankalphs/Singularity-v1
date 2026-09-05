@@ -22,7 +22,7 @@ body {
   }
 }
 .countdown {
-  animation: countdown-pop 0.5s cubic-bezier(0.2, 1.4, 0.4, 1) both;
+  animation: countdown-pop 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @keyframes toast-in {
@@ -54,4 +54,28 @@ body {
 
 kbd {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+::selection {
+  background: #ffd23f;
+  color: #111827;
+}
+
+dialog::backdrop {
+  transition: opacity 160ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .float,
+  .countdown,
+  .toast {
+    animation: none;
+  }
+
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }

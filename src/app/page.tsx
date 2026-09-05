@@ -4,7 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CHALLENGES, ROLES_5, ROLE_INFO, formatTime, type SquadSize } from "@/game/types";
 import { DbConnection, type EventContext } from "@/module_bindings";
-import { SPACETIMEDB_MODULE, SPACETIMEDB_URI } from "@/game/net";
+import { loadSpacetimeToken, saveSpacetimeToken, SPACETIMEDB_MODULE, SPACETIMEDB_URI } from "@/game/net";
+import { storedMilliseconds } from "@/game/time";
+import FeedbackDialog from "@/components/FeedbackDialog";
 
 interface ScoreRow {
   id: string;
@@ -39,13 +41,15 @@ function useScoreFeed() {
     const conn = DbConnection.builder()
       .withUri(SPACETIMEDB_URI)
       .withDatabaseName(SPACETIMEDB_MODULE)
-      .onConnect((c) => {
+      .withToken(loadSpacetimeToken())
+      .onConnect((c, _identity, token) => {
         if (disposed) return;
+        saveSpacetimeToken(token);
         c.subscriptionBuilder()
           .onApplied(() => !disposed && setOnline(true))
           .subscribe(["SELECT * FROM score"]);
         c.db.score.onInsert((_ctx: EventContext, row) => {
-          cache.current.set(row.id.toString(), { challengeId: row.challengeId, teamName: row.teamName, players: row.players, timeMs: Number(row.timeMs / 1000n) });
+          cache.current.set(row.id.toString(), { challengeId: row.challengeId, teamName: row.teamName, players: row.players, timeMs: storedMilliseconds(row.timeMs) });
           sync();
         });
         c.db.score.onDelete((_ctx: EventContext, row) => {
@@ -73,6 +77,7 @@ export default function Home() {
   const { rows, online } = useScoreFeed();
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- localStorage is intentionally read after hydration.
     setName(localStorage.getItem("singularity_name") ?? "");
   }, []);
 
@@ -102,7 +107,7 @@ export default function Home() {
       <div className="mx-auto max-w-5xl px-5 py-10 md:py-16">
         <header className="text-center">
           <div className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.25em] text-white/70">Co-op physics party game · SpacetimeDB</div>
-          <h1 className="mt-4 text-6xl font-black tracking-tight md:text-8xl">
+          <h1 className="mt-4 text-5xl font-black tracking-tight sm:text-6xl md:text-8xl">
             SINGULARITY <span className="text-[#ffd23f]">2</span>
           </h1>
           <p className="mx-auto mt-4 max-w-xl text-lg text-white/75">
@@ -216,7 +221,10 @@ export default function Home() {
           </div>
         </section>
 
-        <footer className="mt-10 text-center text-xs text-white/40">Built with Three.js + Rapier physics + SpacetimeDB. Works best in Chrome with a keyboard and two to four friends yelling at you.</footer>
+        <footer className="mt-10 flex flex-col items-center gap-4 text-center text-xs text-white/60">
+          <p>Built with Three.js + Rapier physics + SpacetimeDB. Works best in Chrome with a keyboard and two to four friends yelling at you.</p>
+          <FeedbackDialog />
+        </footer>
       </div>
     </main>
   );

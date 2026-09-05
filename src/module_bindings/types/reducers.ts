@@ -20,6 +20,7 @@ import SetReadyReducer from "../set_ready_reducer";
 import SetRoleReducer from "../set_role_reducer";
 import SetSquadReducer from "../set_squad_reducer";
 import StartRoundReducer from "../start_round_reducer";
+import SubmitFeedbackReducer from "../submit_feedback_reducer";
 
 export type BackToLobbyParams = __Infer<typeof BackToLobbyReducer>;
 export type CreateTeamParams = __Infer<typeof CreateTeamReducer>;
@@ -35,4 +36,5 @@ export type SetReadyParams = __Infer<typeof SetReadyReducer>;
 export type SetRoleParams = __Infer<typeof SetRoleReducer>;
 export type SetSquadParams = __Infer<typeof SetSquadReducer>;
 export type StartRoundParams = __Infer<typeof StartRoundReducer>;
+export type SubmitFeedbackParams = __Infer<typeof SubmitFeedbackReducer>;
 

@@ -10,9 +10,33 @@ import { DbConnection, type EventContext } from "@/module_bindings";
 import type { Room, Player, Team, Snapshot, Input, Squad } from "@/module_bindings/types";
 import { MAX_TEAM_SIZE, type Phase, type PlayerInfo, type Role, type RoleInput, type RoomSnapshot, type SquadSize, type TeamInfo } from "./types";
 import type { Snap } from "./game";
+import { microsToMilliseconds, storedMilliseconds } from "./time";
 
 export const SPACETIMEDB_URI = process.env.NEXT_PUBLIC_SPACETIMEDB_URI ?? "wss://maincloud.spacetimedb.com";
-export const SPACETIMEDB_MODULE = process.env.NEXT_PUBLIC_SPACETIMEDB_MODULE ?? "singularity2";
+export const SPACETIMEDB_MODULE = process.env.NEXT_PUBLIC_SPACETIMEDB_MODULE ?? "singularity2-sankalphs";
+
+const TOKEN_KEY = `singularity:spacetimedb-token:${SPACETIMEDB_URI}/${SPACETIMEDB_MODULE}`;
+
+// Session storage survives reloads/reconnects while giving each multiplayer
+// tab its own SpacetimeDB identity.
+export function loadSpacetimeToken(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return window.sessionStorage.getItem(TOKEN_KEY) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function saveSpacetimeToken(token: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    // Storage can be unavailable in hardened/private browser contexts. The
+    // current connection still works; only identity continuity is unavailable.
+  }
+}
 
 const ALL_ROLES: Role[] = ["arms", "torso", "legs", "lhand", "rhand", "lleg", "rleg", "head"];
 const RECONNECT_MIN_MS = 500;
@@ -37,10 +61,6 @@ export interface NetHandlers {
 
 function hexOf(id: { toHexString(): string } | undefined | null): string {
   return id ? id.toHexString() : "";
-}
-
-function msOf(micros: bigint): number {
-  return Number(micros / 1000n);
 }
 
 export class Net {
@@ -85,8 +105,11 @@ export class Net {
     DbConnection.builder()
       .withUri(SPACETIMEDB_URI)
       .withDatabaseName(SPACETIMEDB_MODULE)
-      .onConnect((conn, identity) => {
+      .withToken(loadSpacetimeToken())
+      .onConnect((conn, identity, token) => {
         if (this.disposed) return;
+        saveSpacetimeToken(token);
+        this.resetCaches();
         this.conn = conn;
         this.me = identity.toHexString();
         this.reconnectAttempt = 0;
@@ -182,10 +205,13 @@ export class Net {
 
     const cacheTeam = (row: Team) => {
       if (!inRoom(row.code)) return;
-      this.teams.set(row.id.toString(), row);
-      if (row.finishMs != null && !this.finishSeen.has(row.id.toString())) {
-        this.finishSeen.add(row.id.toString());
-        this.handlers.onTeamFinished?.(Number(row.id), msOf(row.finishMs), row.name);
+      const id = row.id.toString();
+      this.teams.set(id, row);
+      if (row.finishMs == null) {
+        this.finishSeen.delete(id);
+      } else if (!this.finishSeen.has(id)) {
+        this.finishSeen.add(id);
+        this.handlers.onTeamFinished?.(Number(row.id), storedMilliseconds(row.finishMs), row.name);
       }
       this.emitRoom();
     };
@@ -238,7 +264,7 @@ export class Net {
     });
 
     conn.db.score.onInsert((_ctx: EventContext, row) => {
-      this.scoreRows.set(row.id.toString(), { challengeId: row.challengeId, teamName: row.teamName, players: row.players, timeMs: msOf(row.timeMs) });
+      this.scoreRows.set(row.id.toString(), { challengeId: row.challengeId, teamName: row.teamName, players: row.players, timeMs: storedMilliseconds(row.timeMs) });
       this.emitScores();
     });
     conn.db.score.onDelete((_ctx: EventContext, row) => {
@@ -259,6 +285,17 @@ export class Net {
     });
   }
 
+  private resetCaches() {
+    this.roomRow = null;
+    this.squadSize = 5;
+    this.players.clear();
+    this.teams.clear();
+    this.inputRows.clear();
+    this.scoreRows.clear();
+    this.finishSeen.clear();
+    this.handlers.onScores?.([]);
+  }
+
   private emitScores() {
     const rows: ScoreRow[] = [...this.scoreRows.entries()]
       .map(([id, r]) => ({ id, ...r }))
@@ -268,7 +305,7 @@ export class Net {
   }
 
   private syncOffset(row: Room) {
-    this.serverOffset = msOf(row.nowMicros) - Date.now();
+    this.serverOffset = microsToMilliseconds(row.nowMicros) - Date.now();
   }
 
   private myTeamId(): bigint | null {
@@ -289,7 +326,7 @@ export class Net {
       ev = JSON.parse(row.ev) as Snap["ev"];
     } catch {}
     return {
-      t: msOf(row.recvMicros),
+      t: microsToMilliseconds(row.recvMicros),
       p: row.p,
       props: row.props,
       yaw: row.yaw,
@@ -318,7 +355,7 @@ export class Net {
       name: t.name,
       color: t.color,
       hostId: hexOf(t.hostId) || null,
-      finishMs: t.finishMs != null ? msOf(t.finishMs) : null,
+      finishMs: t.finishMs != null ? storedMilliseconds(t.finishMs) : null,
     }));
     this.handlers.onRoom({
       code: this.code,
@@ -327,7 +364,7 @@ export class Net {
       squadSize: this.squadSize,
       players: infos,
       teams: teamInfos,
-      startAt: this.roomRow && this.roomRow.startAtMicros > 0n ? msOf(this.roomRow.startAtMicros) + this.serverOffset : null,
+      startAt: this.roomRow && this.roomRow.startAtMicros > 0n ? microsToMilliseconds(this.roomRow.startAtMicros) : null,
       round: this.roomRow?.round ?? 0,
       now: Date.now() + this.serverOffset,
       leaderId: infos[0]?.id ?? null,

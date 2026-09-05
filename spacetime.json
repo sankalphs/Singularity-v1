@@ -1,4 +1,11 @@
 {
+  "database": "singularity2-sankalphs",
   "module-path": "./server",
-  "server": "maincloud"
+  "server": "maincloud",
+  "generate": [
+    {
+      "language": "typescript",
+      "out-dir": "./src/module_bindings"
+    }
+  ]
 }

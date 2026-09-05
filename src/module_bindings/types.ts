@@ -22,6 +22,21 @@ export const Conn = __t.object("Conn", {
 });
 export type Conn = __Infer<typeof Conn>;
 
+export const Feedback = __t.object("Feedback", {
+  id: __t.string(),
+  email: __t.string(),
+  message: __t.string(),
+  createdAt: __t.timestamp(),
+});
+export type Feedback = __Infer<typeof Feedback>;
+
+export const FeedbackRecipientLimit = __t.object("FeedbackRecipientLimit", {
+  email: __t.string(),
+  windowStartedMicros: __t.u64(),
+  count: __t.u8(),
+});
+export type FeedbackRecipientLimit = __Infer<typeof FeedbackRecipientLimit>;
+
 export const Input = __t.object("Input", {
   identity: __t.identity(),
   code: __t.string(),
