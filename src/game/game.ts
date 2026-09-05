@@ -25,6 +25,10 @@ async function loadRapier(): Promise<R> {
   return R;
 }
 
+function usesCompactRenderProfile() {
+  return window.matchMedia("(pointer: coarse), (max-width: 900px)").matches;
+}
+
 export interface Snap {
   t: number;
   p: number[];
@@ -460,8 +464,9 @@ export class Game {
     this.teamColor = opts.teamColor;
     this.squadSize = opts.squadSize === 3 ? 3 : 5;
     const canvas = opts.canvas;
+    const compactRenderProfile = usesCompactRenderProfile();
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, compactRenderProfile ? 1.35 : 1.75));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -488,7 +493,7 @@ export class Game {
     this.scene.add(hemi);
     this.sun = new THREE.DirectionalLight("#fff4e0", 2.2);
     this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(2048, 2048);
+    this.sun.shadow.mapSize.set(compactRenderProfile ? 1024 : 2048, compactRenderProfile ? 1024 : 2048);
     this.sun.shadow.camera.near = 1;
     this.sun.shadow.camera.far = 120;
     this.sun.shadow.camera.left = -22;
@@ -521,6 +526,8 @@ export class Game {
     const c = this.renderer.domElement;
     const w = c.clientWidth || window.innerWidth;
     const h = c.clientHeight || window.innerHeight;
+    const pixelRatio = Math.min(window.devicePixelRatio, usesCompactRenderProfile() ? 1.35 : 1.75);
+    if (Math.abs(this.renderer.getPixelRatio() - pixelRatio) > 0.01) this.renderer.setPixelRatio(pixelRatio);
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();

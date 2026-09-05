@@ -305,7 +305,7 @@ export default function Home() {
         </section>
 
         <footer className="mt-10 flex flex-col items-center gap-4 text-center text-xs text-white/60">
-          <p>Built with Three.js + Rapier physics + SpacetimeDB. Works best in Chrome with a keyboard and two to four friends yelling at you.</p>
+          <p>Built with Three.js + Rapier physics + SpacetimeDB. Play with a keyboard or mobile touch controls—and two to four friends yelling at you.</p>
           <FeedbackDialog />
         </footer>
       </div>

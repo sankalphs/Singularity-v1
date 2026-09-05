@@ -8,6 +8,7 @@ import { Net } from "@/game/net";
 import { topLeaderboardRows, type LeaderboardRow } from "@/game/leaderboard";
 import { InputManager, inputsEqual } from "@/game/input";
 import { getLevel } from "@/game/levels";
+import MobileControls from "@/components/MobileControls";
 
 interface Toast {
   id: number;
@@ -117,6 +118,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
       let next = activeRoleRef.current;
       if (dir === "index") next = Math.min(n - 1, idx ?? 0);
       else next = (next + (dir as number) + n) % n;
+      input.resetVirtualControls();
       activeRoleRef.current = next;
       setActiveRole(next);
     };
@@ -307,7 +309,8 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
   };
   const onCanvasClick = () => {
     ensureAudio();
-    if ((myRoles.includes("torso") || myRoles.includes("head")) && room?.phase !== "lobby") inputRef.current?.requestPointerLock();
+    const hasFinePointer = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+    if (hasFinePointer && (myRoles.includes("torso") || myRoles.includes("head")) && room?.phase !== "lobby") inputRef.current?.requestPointerLock();
   };
 
   const allReady = !!room && room.players.length > 0 && room.players.every((p) => p.ready);
@@ -320,13 +323,13 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
   );
 
   return (
-    <div className="relative h-dvh w-full overflow-hidden bg-[#0b1020] text-white select-none">
-      <canvas ref={canvasRef} onClick={onCanvasClick} className="absolute inset-0 h-full w-full block" style={{ width: "100%", height: "100%" }} />
+    <div className="game-shell relative h-dvh w-full overflow-hidden bg-[#0b1020] text-white select-none">
+      <canvas ref={canvasRef} onClick={onCanvasClick} className="game-canvas absolute inset-0 block h-full w-full" style={{ width: "100%", height: "100%" }} />
 
       {/* Loading */}
       {(!room || !gameReady) && (
         <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-[#0b1020]">
-          <div className="text-5xl font-black tracking-tight mb-3">
+          <div className="mb-3 text-4xl font-black tracking-tight sm:text-5xl">
             SINGULARITY <span className="text-[#ffd23f]">2</span>
           </div>
           <div className="text-white/60 animate-pulse">{connErr ? "Connecting to SpacetimeDB…" : "Loading physics & shaders…"}</div>
@@ -334,7 +337,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
       )}
 
       {/* Top bar */}
-      <div className="pointer-events-none absolute top-0 left-0 right-0 z-20 flex items-start justify-between p-2 sm:p-4">
+      <div className="game-top-bar pointer-events-none absolute top-0 left-0 right-0 z-20 flex items-start justify-between p-2 sm:p-4">
         <div className="pointer-events-auto flex items-center gap-1.5 sm:gap-3">
           <Link href="/" className="rounded-xl bg-black/40 px-2 py-2 text-xs font-bold backdrop-blur hover:bg-black/60 sm:px-3 sm:text-sm">
             ← Lobby
@@ -345,7 +348,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
         </div>
         {/* Timer */}
         {phase !== "lobby" && (
-          <div className="absolute left-1/2 top-14 flex -translate-x-1/2 flex-col items-center sm:static sm:translate-x-0">
+          <div className="game-timer absolute left-1/2 top-14 flex -translate-x-1/2 flex-col items-center sm:static sm:translate-x-0">
             <div className="max-w-[min(240px,calc(100vw-7rem))] rounded-xl bg-black/50 px-3 py-1 text-center shadow-lg backdrop-blur sm:max-w-none sm:rounded-2xl sm:px-6 sm:py-2">
               <div className="font-mono text-2xl font-black tabular-nums tracking-tight sm:text-4xl">{formatTime((myFinish ?? (hud?.timer ?? 0) * 1000) || 0)}</div>
               <div className="max-w-[220px] truncate text-[9px] uppercase tracking-wider text-white/70 sm:max-w-none sm:text-xs sm:tracking-widest">
@@ -364,11 +367,11 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
 
       {/* Team status (right side) */}
       {room && phase !== "lobby" && (
-        <div className="pointer-events-none absolute right-2 top-28 z-20 flex flex-col gap-2 sm:right-4 sm:top-20">
+        <div className="game-team-status pointer-events-none absolute right-2 top-28 z-20 flex flex-col gap-2 sm:right-4 sm:top-20">
           {sortedTeams.map((t) => (
-            <div key={t.id} className="flex items-center gap-2 rounded-xl bg-black/40 backdrop-blur px-3 py-1.5 text-sm">
+            <div key={t.id} className="game-team-chip flex items-center gap-2 rounded-xl bg-black/40 backdrop-blur px-3 py-1.5 text-sm">
               <span className="h-3 w-3 rounded-full" style={{ background: t.color }} />
-              <span className="font-bold">{t.name}</span>
+              <span className="game-team-name font-bold">{t.name}</span>
               <span className="font-mono text-white/80">{t.finishMs != null ? formatTime(t.finishMs) : "…"}</span>
             </div>
           ))}
@@ -377,13 +380,14 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
 
       {/* Role card */}
       {room && me && currentRole && (
-        <div className="absolute bottom-4 left-4 z-20 w-[320px] max-w-[calc(100vw-2rem)]">
+        <div className="desktop-role-card absolute bottom-4 left-4 z-20 w-[320px] max-w-[calc(100vw-2rem)]">
           {myRoles.length > 1 && (
             <div className="mb-2 flex gap-1">
               {myRoles.map((r, i) => (
                 <button
                   key={r}
                   onClick={() => {
+                    inputRef.current?.resetVirtualControls();
                     activeRoleRef.current = i;
                     setActiveRole(i);
                   }}
@@ -423,12 +427,31 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
         </div>
       )}
 
+      {/* Mobile movement and role-aware actions */}
+      {room && me && currentRole && phase !== "lobby" && phase !== "results" && (
+        <MobileControls
+          key={currentRole}
+          inputRef={inputRef}
+          role={currentRole}
+          roles={myRoles}
+          activeRole={activeRole}
+          teamColor={myTeam?.color ?? "#ffd23f"}
+          disabled={!gameReady || myFinish != null}
+          onRoleSelect={(index) => {
+            inputRef.current?.resetVirtualControls();
+            activeRoleRef.current = index;
+            setActiveRole(index);
+          }}
+          onFirstInteraction={ensureAudio}
+        />
+      )}
+
       {/* Status chips */}
       {hud && phase !== "lobby" && (
-        <div className="pointer-events-none absolute bottom-4 right-4 z-20 flex flex-col items-end gap-2">
-          {hud.fallen && <div className="animate-bounce rounded-xl bg-[#ff5d5d] px-4 py-2 font-black shadow-lg">FALLEN! Torso: hold SPACE to get up</div>}
-          {hud.hanging && <div className="rounded-xl bg-[#4fa8ff] px-4 py-2 font-black shadow-lg">HANGING · Arms: S to pull up · Legs: step!</div>}
-          {hud.holding > 0 && !hud.hanging && <div className="rounded-xl bg-[#6ef29a] text-black px-4 py-2 font-black shadow-lg">HOLDING · Arms: Shift to throw</div>}
+        <div className="game-status-chips pointer-events-none absolute bottom-4 right-4 z-20 flex flex-col items-end gap-2">
+          {hud.fallen && <div className="animate-bounce rounded-xl bg-[#ff5d5d] px-4 py-2 font-black shadow-lg">FALLEN! Torso: hold BRACE to get up</div>}
+          {hud.hanging && <div className="rounded-xl bg-[#4fa8ff] px-4 py-2 font-black shadow-lg">HANGING · Arms: pull down · Legs: step!</div>}
+          {hud.holding > 0 && !hud.hanging && <div className="rounded-xl bg-[#6ef29a] text-black px-4 py-2 font-black shadow-lg">HOLDING · Arms: THROW when ready</div>}
           {hud.crouch && <div className="rounded-xl bg-black/50 px-3 py-1 text-sm font-bold">Crouching</div>}
           {isHost && hud.brace < 1 && (
             <div className="w-40 rounded-full bg-black/50 p-1">
@@ -455,7 +478,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
       {/* Countdown */}
       {countdown !== null && (
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
-          <div key={countdown} className="countdown text-[10rem] font-black drop-shadow-[0_8px_0_rgba(0,0,0,0.4)]" style={{ color: countdown === 0 ? "#6ef29a" : "#ffd23f" }}>
+          <div key={countdown} className="countdown text-[7rem] font-black drop-shadow-[0_8px_0_rgba(0,0,0,0.4)] sm:text-[10rem]" style={{ color: countdown === 0 ? "#6ef29a" : "#ffd23f" }}>
             {countdown === 0 ? "GO!" : countdown}
           </div>
         </div>
@@ -464,7 +487,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
       {/* Finish banner (mine) */}
       {myFinish != null && phase === "playing" && (
         <div className="pointer-events-none absolute inset-x-0 top-[30%] z-30 flex flex-col items-center">
-          <div className="countdown text-6xl font-black text-[#ffd23f] drop-shadow-[0_6px_0_rgba(0,0,0,0.4)]">FINISHED!</div>
+          <div className="countdown text-4xl font-black text-[#ffd23f] drop-shadow-[0_6px_0_rgba(0,0,0,0.4)] sm:text-6xl">FINISHED!</div>
           <div className="mt-2 font-mono text-3xl font-black">{formatTime(myFinish)}</div>
           <div className="mt-1 text-white/80">Waiting for other teams…</div>
         </div>
@@ -472,7 +495,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
 
       {/* Lobby panel */}
       {room && me && phase === "lobby" && (
-        <div className="absolute inset-y-0 right-0 z-20 flex w-full max-w-[440px] flex-col gap-3 overflow-y-auto p-4 pt-20">
+        <div className="game-lobby-panel absolute inset-y-0 right-0 z-20 flex w-full max-w-[440px] touch-pan-y flex-col gap-3 overflow-y-auto p-4 pt-20">
           <div className="rounded-2xl bg-black/60 backdrop-blur p-4 border border-white/10 shadow-xl">
             <div className="flex items-center justify-between">
               <div>
@@ -621,8 +644,8 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
 
       {/* Results */}
       {room && phase === "results" && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="w-full max-w-3xl rounded-3xl bg-[#121a33] border border-white/10 p-6 shadow-2xl">
+        <div className="game-results-overlay absolute inset-0 z-30 flex items-center justify-center bg-black/50 backdrop-blur-sm p-3 sm:p-4">
+          <div className="game-results-panel max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl touch-pan-y overflow-y-auto rounded-3xl bg-[#121a33] border border-white/10 p-4 shadow-2xl sm:max-h-[calc(100dvh-2rem)] sm:p-6">
             <div className="text-center">
               <div className="text-[11px] uppercase tracking-[0.3em] text-white/60">{challenge.name}</div>
               <div className="text-4xl font-black">RESULTS</div>

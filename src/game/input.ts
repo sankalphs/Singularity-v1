@@ -1,10 +1,17 @@
 import { emptyInput, type Role, type RoleInput } from "./types";
 
-/** Keyboard + mouse → per-role inputs. Every role uses the same keys (WASD/Space/Shift/Q/E). */
+export type VirtualAction = "a" | "b" | "q" | "e";
+
+const clampAxis = (value: number) => (Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : 0);
+
+/** Keyboard + mouse + virtual controls → per-role inputs. */
 export class InputManager {
   keys = new Set<string>();
   yaw = 0;
   pitch = 0;
+  private virtualForward = 0;
+  private virtualSide = 0;
+  private virtualActions: Record<VirtualAction, boolean> = { a: false, b: false, q: false, e: false };
   private canvas: HTMLElement | null = null;
   private dragging = false;
   private lastX = 0;
@@ -14,7 +21,8 @@ export class InputManager {
 
   private onKeyDown = (e: KeyboardEvent) => {
     const t = e.target as HTMLElement | null;
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
+    if (t?.tagName === "BUTTON" && ["Tab", "Space", "Enter"].includes(e.code)) return;
     if (e.code === "Tab") {
       e.preventDefault();
       this.onRoleSwitch?.(e.shiftKey ? -1 : 1);
@@ -33,6 +41,7 @@ export class InputManager {
   private onBlur = () => {
     this.keys.clear();
     this.dragging = false;
+    this.resetVirtualControls();
   };
   private onMouseMove = (e: MouseEvent) => {
     if (!this.enabled) return;
@@ -69,29 +78,65 @@ export class InputManager {
   }
 
   detach() {
-    window.removeEventListener("keydown", this.onKeyDown);
-    window.removeEventListener("keyup", this.onKeyUp);
-    window.removeEventListener("blur", this.onBlur);
-    window.removeEventListener("mousemove", this.onMouseMove);
-    window.removeEventListener("mousedown", this.onMouseDown);
-    window.removeEventListener("mouseup", this.onMouseUp);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("keydown", this.onKeyDown);
+      window.removeEventListener("keyup", this.onKeyUp);
+      window.removeEventListener("blur", this.onBlur);
+      window.removeEventListener("mousemove", this.onMouseMove);
+      window.removeEventListener("mousedown", this.onMouseDown);
+      window.removeEventListener("mouseup", this.onMouseUp);
+    }
+    this.keys.clear();
+    this.dragging = false;
+    this.resetVirtualControls();
+    this.canvas = null;
   }
 
   requestPointerLock() {
     this.canvas?.requestPointerLock?.();
   }
 
+  setVirtualMovement(forward: number, side: number) {
+    this.virtualForward = clampAxis(forward);
+    this.virtualSide = clampAxis(side);
+  }
+
+  setVirtualAction(action: VirtualAction, pressed: boolean) {
+    this.virtualActions[action] = pressed;
+  }
+
+  resetVirtualControls() {
+    this.virtualForward = 0;
+    this.virtualSide = 0;
+    this.virtualActions.a = false;
+    this.virtualActions.b = false;
+    this.virtualActions.q = false;
+    this.virtualActions.e = false;
+  }
+
   private down(...codes: string[]) {
     return codes.some((c) => this.keys.has(c));
   }
 
-  /** Update head yaw/pitch from keys (called each frame). */
+  private movement() {
+    const keyboardForward = (this.down("KeyW", "ArrowUp") ? 1 : 0) - (this.down("KeyS", "ArrowDown") ? 1 : 0);
+    const keyboardSide = (this.down("KeyD", "ArrowRight") ? 1 : 0) - (this.down("KeyA", "ArrowLeft") ? 1 : 0);
+    return {
+      forward: clampAxis(keyboardForward + this.virtualForward),
+      side: clampAxis(keyboardSide + this.virtualSide),
+    };
+  }
+
+  private action(action: VirtualAction, ...codes: string[]) {
+    return this.virtualActions[action] || this.down(...codes);
+  }
+
+  /** Update head yaw/pitch from keyboard or virtual movement (called each frame). */
   tickHead(dt: number, keysActive: boolean) {
     if (!keysActive) return;
-    const turn = (this.down("KeyA", "ArrowLeft") ? 1 : 0) - (this.down("KeyD", "ArrowRight") ? 1 : 0);
-    const look = (this.down("KeyW", "ArrowUp") ? 1 : 0) - (this.down("KeyS", "ArrowDown") ? 1 : 0);
-    this.yaw += turn * dt * 2.2;
-    this.pitch = Math.max(-0.9, Math.min(0.7, this.pitch + look * dt * 1.4));
+    const { forward, side } = this.movement();
+    this.yaw -= side * dt * 2.2;
+    this.pitch = Math.max(-0.9, Math.min(0.7, this.pitch + forward * dt * 1.4));
   }
 
   read(role: Role, keysActive: boolean): RoleInput {
@@ -100,15 +145,16 @@ export class InputManager {
     i.ly = this.pitch;
     if (!keysActive || !this.enabled) return i;
     if (role === "head") {
-      i.a = this.down("Space");
+      i.a = this.action("a", "Space");
       return i;
     }
-    i.f = (this.down("KeyW", "ArrowUp") ? 1 : 0) - (this.down("KeyS", "ArrowDown") ? 1 : 0);
-    i.s = (this.down("KeyD", "ArrowRight") ? 1 : 0) - (this.down("KeyA", "ArrowLeft") ? 1 : 0);
-    i.a = this.down("Space");
-    i.b = this.down("ShiftLeft", "ShiftRight");
-    i.q = this.down("KeyQ");
-    i.e = this.down("KeyE");
+    const movement = this.movement();
+    i.f = movement.forward;
+    i.s = movement.side;
+    i.a = this.action("a", "Space");
+    i.b = this.action("b", "ShiftLeft", "ShiftRight");
+    i.q = this.action("q", "KeyQ");
+    i.e = this.action("e", "KeyE");
     return i;
   }
 }
