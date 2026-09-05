@@ -48,6 +48,17 @@ export const Input = __t.object("Input", {
 });
 export type Input = __Infer<typeof Input>;
 
+export const Leaderboard = __t.object("Leaderboard", {
+  id: __t.u64(),
+  challengeId: __t.string(),
+  squadSize: __t.u8(),
+  teamName: __t.string(),
+  players: __t.array(__t.string()),
+  timeMs: __t.u64(),
+  createdAt: __t.timestamp(),
+});
+export type Leaderboard = __Infer<typeof Leaderboard>;
+
 export const Player = __t.object("Player", {
   identity: __t.identity(),
   code: __t.string(),
@@ -60,6 +71,18 @@ export const Player = __t.object("Player", {
   lastSeenMicros: __t.u64(),
 });
 export type Player = __Infer<typeof Player>;
+
+export const RankedAttempt = __t.object("RankedAttempt", {
+  teamId: __t.u64(),
+  code: __t.string(),
+  round: __t.u32(),
+  squadSize: __t.u8(),
+  eligible: __t.bool(),
+  startHostId: __t.identity(),
+  playerIds: __t.array(__t.identity()),
+  playerNames: __t.array(__t.string()),
+});
+export type RankedAttempt = __Infer<typeof RankedAttempt>;
 
 export const RoleInput = __t.object("RoleInput", {
   f: __t.f32(),

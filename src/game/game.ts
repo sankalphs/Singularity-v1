@@ -978,9 +978,8 @@ export class Game {
       this.sendAcc += dt;
       if (this.sendAcc >= 1 / 15) {
         this.sendAcc = 0;
-        this.onSnapshot?.(this.buildSnapshot());
-        this.pendingEvents = [];
-        this.pendingMsg = undefined;
+        const snapshot = this.takeSnapshot();
+        this.onSnapshot?.(snapshot);
       }
     } else {
       this.applyInterpolated(this.ownBuffer, this.displayTransforms, true);
@@ -1181,6 +1180,10 @@ export class Game {
     if (this.finished) return;
     this.finished = true;
     this.running = false;
+    // Capture the exact completion pose before the finish reducer is sent. The
+    // server uses the resulting host snapshot as a lightweight objective proof.
+    this.body?.writeTransforms(this.displayTransforms);
+    this.displayFallen = this.body?.fallen ?? this.displayFallen;
     const pp = this.body!.pelvisPos(new THREE.Vector3());
     this.handleLevelEvent({ type: "finish", pos: [pp.x, pp.y + 1, pp.z] }, true);
     this.commentOnObjective({ type: "finish" });
@@ -1359,6 +1362,14 @@ export class Game {
       ev: this.pendingEvents,
       msg: this.pendingMsg,
     };
+  }
+
+  /** Build a network snapshot and consume its one-shot effects/message. */
+  takeSnapshot(): Snap {
+    const snapshot = this.buildSnapshot();
+    this.pendingEvents = [];
+    this.pendingMsg = undefined;
+    return snapshot;
   }
 
   /** Snapshot from own team's host (when this client is not the host). */

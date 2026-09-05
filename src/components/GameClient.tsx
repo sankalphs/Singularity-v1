@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { CHALLENGES, ROLE_INFO, formatTime, squadRoles, type Role, type RoleInput, type RoomSnapshot, type SquadSize } from "@/game/types";
 import type { Game, HudState, Snap } from "@/game/game";
-import { Net, type ScoreRow } from "@/game/net";
+import { Net } from "@/game/net";
+import { topLeaderboardRows, type LeaderboardRow } from "@/game/leaderboard";
 import { InputManager, inputsEqual } from "@/game/input";
 import { getLevel } from "@/game/levels";
 
@@ -38,7 +39,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [activeRole, setActiveRole] = useState(0);
-  const [leaderboard, setLeaderboard] = useState<ScoreRow[]>([]);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardRow[]>([]);
   const [boardSquad, setBoardSquad] = useState<SquadSize>(5);
   const [muted, setMuted] = useState(false);
   const [ready, setReady] = useState(false);
@@ -153,7 +154,10 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
           else if (ev.type === "message") addToast(ev.text, ev.tone);
           else if (ev.type === "finish") {
             setMyFinish(ev.timeMs);
-            netRef.current?.finishRun(ev.timeMs);
+            const game = gameRef.current;
+            if (game?.isHost) {
+              netRef.current?.completeRun(game.takeSnapshot(), ev.timeMs);
+            }
           }
         },
       });
@@ -238,6 +242,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
       } else if (room.phase === "results") {
         g.stopRun();
         setCountdown(null);
+        setBoardSquad(room.squadSize);
         g.audio.stopMusic();
       }
     }
@@ -310,7 +315,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
   const sortedTeams = room ? [...room.teams].sort((a, b) => (a.finishMs ?? 1e12) - (b.finishMs ?? 1e12)) : [];
   const level = room ? getLevel(room.challengeId) : null;
   const roomScores = useMemo(
-    () => leaderboard.filter((row) => row.challengeId === room?.challengeId && (row.players?.length ?? 5) === boardSquad).slice(0, 10),
+    () => topLeaderboardRows(leaderboard, room?.challengeId ?? "", boardSquad),
     [leaderboard, room?.challengeId, boardSquad]
   );
 
@@ -640,7 +645,7 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
               </div>
               <div>
                 <div className="mb-2 flex items-center justify-between">
-                  <span className="text-xs uppercase tracking-widest text-white/60">All-time leaderboard</span>
+                  <span className="text-xs uppercase tracking-widest text-white/60">Global leaderboard</span>
                   <span className="flex gap-1">
                     {([3, 5] as SquadSize[]).map((n) => (
                       <button
@@ -652,6 +657,9 @@ export default function GameClient({ code, solo }: { code: string; solo: boolean
                       </button>
                     ))}
                   </span>
+                </div>
+                <div className="mb-2 text-[11px] text-white/45">
+                  Only complete, non-practice squads locked at round start are globally ranked.
                 </div>
                 <div className="flex flex-col gap-1 max-h-72 overflow-y-auto pr-1">
                   {roomScores.length === 0 && <div className="text-sm text-white/50">No times yet. Be the first!</div>}

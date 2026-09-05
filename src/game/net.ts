@@ -7,10 +7,11 @@
  * it talked to the old Net.
  */
 import { DbConnection, type EventContext } from "@/module_bindings";
-import type { Room, Player, Team, Snapshot, Input, Squad } from "@/module_bindings/types";
+import type { Room, Player, Team, Snapshot, Input, Squad, Leaderboard } from "@/module_bindings/types";
 import { MAX_TEAM_SIZE, type Phase, type PlayerInfo, type Role, type RoleInput, type RoomSnapshot, type SquadSize, type TeamInfo } from "./types";
 import type { Snap } from "./game";
 import { microsToMilliseconds, storedMilliseconds } from "./time";
+import { compareLeaderboardRows, type LeaderboardRow } from "./leaderboard";
 
 export const SPACETIMEDB_URI = process.env.NEXT_PUBLIC_SPACETIMEDB_URI ?? "wss://maincloud.spacetimedb.com";
 export const SPACETIMEDB_MODULE = process.env.NEXT_PUBLIC_SPACETIMEDB_MODULE ?? "singularity2-sankalphs";
@@ -42,21 +43,13 @@ const ALL_ROLES: Role[] = ["arms", "torso", "legs", "lhand", "rhand", "lleg", "r
 const RECONNECT_MIN_MS = 500;
 const RECONNECT_MAX_MS = 5000;
 
-export interface ScoreRow {
-  id: string;
-  challengeId: string;
-  teamName: string;
-  players: string[];
-  timeMs: number;
-}
-
 export interface NetHandlers {
   onRoom?: (room: RoomSnapshot) => void;
   onRemoteInputs?: (inputs: Partial<Record<Role, RoleInput>>) => void;
   onSnapshot?: (teamId: number, snap: Snap) => void;
   onTeamFinished?: (teamId: number, timeMs: number, teamName: string) => void;
   onConnectionChange?: (connected: boolean) => void;
-  onScores?: (rows: ScoreRow[]) => void;
+  onScores?: (rows: LeaderboardRow[]) => void;
 }
 
 function hexOf(id: { toHexString(): string } | undefined | null): string {
@@ -75,13 +68,24 @@ export class Net {
   private hbTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
+  private connectionGeneration = 0;
   private roomRow: Room | null = null;
   private squadSize: SquadSize = 5;
   private players = new Map<string, Player>();
   private teams = new Map<string, Team>();
   private inputRows = new Map<string, Input>();
-  private scoreRows = new Map<string, { challengeId: string; teamName: string; players: string[]; timeMs: number }>();
+  private leaderboardRows = new Map<string, LeaderboardRow>();
   private finishSeen = new Set<string>();
+  private lastRound = 0;
+  private lastTeamId: bigint | null = null;
+  private pendingFinish: {
+    round: number;
+    teamId: bigint;
+    timeMs: bigint;
+    snapshot: Snap;
+    sentGeneration: number | null;
+    sentOnce: boolean;
+  } | null = null;
   serverOffset = 0; // serverMs - clientMs
   connected = false;
 
@@ -89,6 +93,12 @@ export class Net {
     this.code = code.toUpperCase();
     this.name = name;
     this.solo = solo;
+    if (typeof window !== "undefined") {
+      document.addEventListener("visibilitychange", this.resumeWhenVisible);
+      window.addEventListener("focus", this.resume);
+      window.addEventListener("online", this.resume);
+      window.addEventListener("pageshow", this.resume);
+    }
   }
 
   setHandlers(h: NetHandlers) {
@@ -101,25 +111,34 @@ export class Net {
   }
 
   connect() {
-    this.destroyed = false;
-    DbConnection.builder()
+    if (this.disposed || this.destroyed || this.conn) return;
+    const generation = ++this.connectionGeneration;
+    const conn = DbConnection.builder()
       .withUri(SPACETIMEDB_URI)
       .withDatabaseName(SPACETIMEDB_MODULE)
       .withToken(loadSpacetimeToken())
       .onConnect((conn, identity, token) => {
-        if (this.disposed) return;
+        if (this.disposed || this.destroyed || generation !== this.connectionGeneration) {
+          conn.disconnect();
+          return;
+        }
         saveSpacetimeToken(token);
         this.resetCaches();
         this.conn = conn;
         this.me = identity.toHexString();
-        this.reconnectAttempt = 0;
-        this.wire(conn);
+        this.wire(conn, generation);
         conn.subscriptionBuilder()
           .onApplied(() => {
+            if (this.disposed || generation !== this.connectionGeneration || this.conn !== conn) return;
+            this.reconnectAttempt = 0;
             this.connected = true;
             this.handlers.onConnectionChange?.(true);
             this.callJoinRoom(conn);
+            this.flushPendingFinish(conn);
             this.emitRoom();
+          })
+          .onError(() => {
+            if (generation === this.connectionGeneration && this.conn === conn) conn.disconnect();
           })
           .subscribe([
             `SELECT * FROM room WHERE code = '${this.code}'`,
@@ -128,17 +147,29 @@ export class Net {
             `SELECT * FROM snapshot WHERE code = '${this.code}'`,
             `SELECT * FROM input WHERE code = '${this.code}'`,
             `SELECT * FROM squad WHERE code = '${this.code}'`,
-            `SELECT * FROM score`,
+            `SELECT * FROM leaderboard`,
           ]);
       })
-      .onConnectError(() => this.scheduleReconnect())
+      .onConnectError(() => {
+        if (generation !== this.connectionGeneration) return;
+        this.conn = null;
+        this.scheduleReconnect();
+      })
       .onDisconnect(() => {
+        if (generation !== this.connectionGeneration) return;
         this.conn = null;
         this.connected = false;
         this.handlers.onConnectionChange?.(false);
         if (!this.disposed && !this.destroyed) this.scheduleReconnect();
       })
       .build();
+    if (this.disposed || this.destroyed || generation !== this.connectionGeneration) {
+      conn.disconnect();
+    } else {
+      // Retain the in-flight connection immediately so close() can tear down a
+      // handshake that has not reached onConnect yet.
+      this.conn = conn;
+    }
   }
 
   private scheduleReconnect() {
@@ -149,6 +180,38 @@ export class Net {
       if (!this.disposed && !this.destroyed) this.connect();
     }, delay);
   }
+
+  private resume = () => {
+    if (this.disposed || this.destroyed) return;
+    if (this.reconnectTimer && !this.conn) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.reconnectAttempt = 0;
+      this.connect();
+      return;
+    }
+
+    const stale = this.conn;
+    if (stale?.isSocketClosed) {
+      this.conn = null;
+      this.connectionGeneration += 1;
+      this.reconnectAttempt = 0;
+      this.connected = false;
+      this.handlers.onConnectionChange?.(false);
+      stale.disconnect();
+      this.connect();
+      return;
+    }
+
+    if (!this.conn) {
+      this.reconnectAttempt = 0;
+      this.connect();
+    }
+  };
+
+  private resumeWhenVisible = () => {
+    if (document.visibilityState === "visible") this.resume();
+  };
 
   private callJoinRoom(conn: DbConnection) {
     conn.reducers.joinRoom({ code: this.code, name: this.name, solo: this.solo });
@@ -161,42 +224,84 @@ export class Net {
     }
   }
 
-  private wire(conn: DbConnection) {
+  private flushPendingFinish(conn: DbConnection | null = this.conn) {
+    const pending = this.pendingFinish;
+    if (!pending || !conn || !this.connected || this.conn !== conn) return;
+    if (this.roomRow && this.roomRow.round !== pending.round) {
+      this.pendingFinish = null;
+      return;
+    }
+    const me = this.players.get(this.me);
+    if (!me || me.teamId !== pending.teamId) return;
+    const tm = this.teams.get(pending.teamId.toString());
+    if (!tm) return;
+    if (tm.finishMs != null) {
+      this.pendingFinish = null;
+      return;
+    }
+    if (!this.roomRow || this.roomRow.phase !== "playing") return;
+    if (pending.sentGeneration === this.connectionGeneration) return;
+
+    try {
+      const proof = pending.sentOnce
+        ? { ...pending.snapshot, ev: [], msg: undefined }
+        : pending.snapshot;
+      this.sendSnapshot(conn, proof);
+      pending.sentOnce = true;
+      conn.reducers.finishRun({ timeMs: pending.timeMs });
+      pending.sentGeneration = this.connectionGeneration;
+    } catch {
+      // Keep the completion queued. A reconnect or subsequent table update will
+      // retry it with a fresh proof timestamp.
+    }
+  }
+
+  private wire(conn: DbConnection, generation: number) {
+    const active = () => generation === this.connectionGeneration && this.conn === conn && !this.disposed;
     const inRoom = (code: string) => code === this.code;
 
     conn.db.room.onInsert((_ctx: EventContext, row: Room) => {
-      if (!inRoom(row.code)) return;
+      if (!active() || !inRoom(row.code)) return;
       this.roomRow = row;
+      this.lastRound = row.round;
       this.syncOffset(row);
       this.emitRoom();
+      this.flushPendingFinish(conn);
     });
     conn.db.room.onUpdate((_ctx: EventContext, _prev: Room, next: Room) => {
-      if (!inRoom(next.code)) return;
+      if (!active() || !inRoom(next.code)) return;
       this.roomRow = next;
+      this.lastRound = next.round;
       this.syncOffset(next);
       this.emitRoom();
+      this.flushPendingFinish(conn);
     });
     conn.db.room.onDelete((_ctx: EventContext, row: Room) => {
-      if (!inRoom(row.code)) return;
+      if (!active() || !inRoom(row.code)) return;
       this.roomRow = null;
       this.emitRoom();
     });
 
     const cachePlayer = (row: Player) => {
-      if (!inRoom(row.code)) return;
+      if (!active() || !inRoom(row.code)) return;
       this.players.set(hexOf(row.identity), row);
+      if (row.identity.toHexString() === this.me) this.lastTeamId = row.teamId;
       this.emitRoom();
+      this.flushPendingFinish(conn);
     };
     conn.db.player.onInsert((_ctx: EventContext, row: Player) => cachePlayer(row));
     conn.db.player.onUpdate((_ctx: EventContext, _prev: Player, next: Player) => cachePlayer(next));
     conn.db.player.onDelete((_ctx: EventContext, row: Player) => {
+      if (!active()) return;
       const hex = hexOf(row.identity);
       if (hex === this.me) {
         // cleanup beat us to it (or we were kicked) — rejoin
         this.players.delete(hex);
         this.emitRoom();
         if (!this.disposed && !this.destroyed && this.conn) {
-          setTimeout(() => this.conn && this.callJoinRoom(this.conn), 800);
+          setTimeout(() => {
+            if (active()) this.callJoinRoom(conn);
+          }, 800);
         }
         return;
       }
@@ -204,7 +309,7 @@ export class Net {
     });
 
     const cacheTeam = (row: Team) => {
-      if (!inRoom(row.code)) return;
+      if (!active() || !inRoom(row.code)) return;
       const id = row.id.toString();
       this.teams.set(id, row);
       if (row.finishMs == null) {
@@ -214,10 +319,12 @@ export class Net {
         this.handlers.onTeamFinished?.(Number(row.id), storedMilliseconds(row.finishMs), row.name);
       }
       this.emitRoom();
+      this.flushPendingFinish(conn);
     };
     conn.db.team.onInsert((_ctx: EventContext, row: Team) => cacheTeam(row));
     conn.db.team.onUpdate((_ctx: EventContext, _prev: Team, next: Team) => cacheTeam(next));
     conn.db.team.onDelete((_ctx: EventContext, row: Team) => {
+      if (!active()) return;
       if (this.teams.delete(row.id.toString())) {
         this.finishSeen.delete(row.id.toString());
         this.emitRoom();
@@ -225,7 +332,7 @@ export class Net {
     });
 
     const applySnapshot = (row: Snapshot) => {
-      if (!inRoom(row.code)) return;
+      if (!active() || !inRoom(row.code)) return;
       // the host does not need to hear its own broadcast
       if (row.teamId === this.myTeamId() && this.amHost()) return;
       this.handlers.onSnapshot?.(Number(row.teamId), this.toSnap(row));
@@ -234,6 +341,7 @@ export class Net {
     conn.db.snapshot.onUpdate((_ctx: EventContext, _prev: Snapshot, next: Snapshot) => applySnapshot(next));
 
     const applyInputs = () => {
+      if (!active()) return;
       const myTeam = this.myTeamId();
       if (myTeam == null) return;
       const merged: Partial<Record<Role, RoleInput>> = {};
@@ -250,36 +358,47 @@ export class Net {
       this.handlers.onRemoteInputs?.(merged);
     };
     conn.db.input.onInsert((_ctx: EventContext, row: Input) => {
-      if (!inRoom(row.code)) return;
+      if (!active() || !inRoom(row.code)) return;
       this.inputRows.set(hexOf(row.identity), row);
       applyInputs();
     });
     conn.db.input.onUpdate((_ctx: EventContext, _prev: Input, next: Input) => {
-      if (!inRoom(next.code)) return;
+      if (!active() || !inRoom(next.code)) return;
       this.inputRows.set(hexOf(next.identity), next);
       applyInputs();
     });
     conn.db.input.onDelete((_ctx: EventContext, row: Input) => {
+      if (!active()) return;
       if (this.inputRows.delete(hexOf(row.identity))) applyInputs();
     });
 
-    conn.db.score.onInsert((_ctx: EventContext, row) => {
-      this.scoreRows.set(row.id.toString(), { challengeId: row.challengeId, teamName: row.teamName, players: row.players, timeMs: storedMilliseconds(row.timeMs) });
+    conn.db.leaderboard.onInsert((_ctx: EventContext, row: Leaderboard) => {
+      if (!active()) return;
+      const id = row.id.toString();
+      this.leaderboardRows.set(id, {
+        id,
+        challengeId: row.challengeId,
+        squadSize: row.squadSize === 3 ? 3 : 5,
+        teamName: row.teamName,
+        players: row.players,
+        timeMs: storedMilliseconds(row.timeMs),
+      });
       this.emitScores();
     });
-    conn.db.score.onDelete((_ctx: EventContext, row) => {
-      if (this.scoreRows.delete(row.id.toString())) this.emitScores();
+    conn.db.leaderboard.onDelete((_ctx: EventContext, row: Leaderboard) => {
+      if (!active()) return;
+      if (this.leaderboardRows.delete(row.id.toString())) this.emitScores();
     });
 
     const applySquad = (row: Squad) => {
-      if (!inRoom(row.code)) return;
+      if (!active() || !inRoom(row.code)) return;
       this.squadSize = row.size === 3 ? 3 : 5;
       this.emitRoom();
     };
     conn.db.squad.onInsert((_ctx: EventContext, row: Squad) => applySquad(row));
     conn.db.squad.onUpdate((_ctx: EventContext, _prev: Squad, next: Squad) => applySquad(next));
     conn.db.squad.onDelete((_ctx: EventContext, row: Squad) => {
-      if (!inRoom(row.code)) return;
+      if (!active() || !inRoom(row.code)) return;
       this.squadSize = 5;
       this.emitRoom();
     });
@@ -291,16 +410,13 @@ export class Net {
     this.players.clear();
     this.teams.clear();
     this.inputRows.clear();
-    this.scoreRows.clear();
+    this.leaderboardRows.clear();
     this.finishSeen.clear();
     this.handlers.onScores?.([]);
   }
 
   private emitScores() {
-    const rows: ScoreRow[] = [...this.scoreRows.entries()]
-      .map(([id, r]) => ({ id, ...r }))
-      .sort((a, b) => a.timeMs - b.timeMs)
-      .slice(0, 50);
+    const rows = [...this.leaderboardRows.values()].sort(compareLeaderboardRows);
     this.handlers.onScores?.(rows);
   }
 
@@ -397,8 +513,24 @@ export class Net {
   backToLobby() {
     this.conn?.reducers.backToLobby({});
   }
-  finishRun(timeMs: number) {
-    this.conn?.reducers.finishRun({ timeMs: BigInt(Math.max(0, Math.round(timeMs))) });
+  completeRun(snapshot: Snap, timeMs: number) {
+    const round = this.roomRow?.round ?? this.lastRound;
+    const teamId = this.players.get(this.me)?.teamId ?? this.lastTeamId;
+    if (round <= 0 || teamId == null) return;
+    this.pendingFinish = {
+      round,
+      teamId,
+      timeMs: BigInt(Math.max(0, Math.round(timeMs))),
+      snapshot: {
+        ...snapshot,
+        p: [...snapshot.p],
+        props: [...snapshot.props],
+        ev: [...snapshot.ev],
+      },
+      sentGeneration: null,
+      sentOnce: false,
+    };
+    this.flushPendingFinish();
   }
 
   sendInputs(payload: Partial<Record<Role, RoleInput>>) {
@@ -413,8 +545,8 @@ export class Net {
     });
   }
 
-  publishSnapshot(s: Snap) {
-    this.conn?.reducers.publishSnapshot({
+  private sendSnapshot(conn: DbConnection, s: Snap) {
+    conn.reducers.publishSnapshot({
       p: s.p as number[],
       props: s.props as number[],
       yaw: s.yaw,
@@ -425,6 +557,10 @@ export class Net {
       ev: JSON.stringify(s.ev),
       msg: s.msg,
     });
+  }
+
+  publishSnapshot(s: Snap) {
+    if (this.conn) this.sendSnapshot(this.conn, s);
   }
 
   serverNow() {
@@ -440,8 +576,15 @@ export class Net {
   close() {
     this.disposed = true;
     this.destroyed = true;
+    this.connectionGeneration += 1;
     if (this.hbTimer) clearInterval(this.hbTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (typeof window !== "undefined") {
+      document.removeEventListener("visibilitychange", this.resumeWhenVisible);
+      window.removeEventListener("focus", this.resume);
+      window.removeEventListener("online", this.resume);
+      window.removeEventListener("pageshow", this.resume);
+    }
     this.leave();
     this.conn?.disconnect();
     this.conn = null;
@@ -449,3 +592,4 @@ export class Net {
 }
 
 export { MAX_TEAM_SIZE };
+export type { LeaderboardRow } from "./leaderboard";

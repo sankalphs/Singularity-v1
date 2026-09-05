@@ -8,6 +8,8 @@
  */
 import { schema, table, t, SenderError } from 'spacetimedb/server';
 import { ScheduleAt } from 'spacetimedb';
+import { overflowLeaderboardIds } from './leaderboard';
+import { snapshotMatchesObjective } from './objective-proof';
 
 /* ---------------------------------- constants ---------------------------------- */
 
@@ -23,6 +25,9 @@ const COUNTDOWN_MICROS = 4_200_000n; // 4.2s
 const GRACE_MICROS = 45_000_000n; // 45s for remaining teams after a finish
 const CLEANUP_INTERVAL_MICROS = 60_000_000n; // 60s
 const STALE_MICROS = 600_000_000n; // 10min without heartbeat -> gone
+const LEADERBOARD_LIMIT = 10;
+const MIN_RANKED_RUN_MS = 1_000n;
+const OBJECTIVE_PROOF_MAX_AGE_MICROS = 1_000_000n;
 const FEEDBACK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const FEEDBACK_EMAIL_LOCAL = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/i;
 const FEEDBACK_EMAIL_DOMAIN_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
@@ -148,6 +153,10 @@ const input = table(
   }
 );
 
+/**
+ * Legacy read-only score schema retained so older clients can still subscribe
+ * during a rollout. New finishes are written only to the bounded leaderboard.
+ */
 const score = table(
   { name: 'score', public: true },
   {
@@ -157,6 +166,48 @@ const score = table(
     players: t.array(t.string()),
     time_ms: t.u64(),
     created_at: t.timestamp(),
+  }
+);
+
+/**
+ * Materialized global leaderboard. Unlike the legacy score history above, this
+ * table is kept bounded to the ten fastest runs for each challenge and squad.
+ */
+const leaderboard = table(
+  {
+    name: 'leaderboard',
+    public: true,
+    indexes: [
+      {
+        accessor: 'challenge_squad',
+        algorithm: 'btree',
+        columns: ['challenge_id', 'squad_size'] as const,
+      },
+    ],
+  },
+  {
+    id: t.u64().primaryKey().autoInc(),
+    challenge_id: t.string(),
+    squad_size: t.u8(),
+    team_name: t.string(),
+    players: t.array(t.string()),
+    time_ms: t.u64(),
+    created_at: t.timestamp(),
+  }
+);
+
+/** Private snapshot of each team's roster when a round begins. */
+const ranked_attempt = table(
+  { name: 'ranked_attempt', public: false },
+  {
+    team_id: t.u64().primaryKey(),
+    code: t.string().index('btree'),
+    round: t.u32(),
+    squad_size: t.u8(),
+    eligible: t.bool(),
+    start_host_id: t.identity(),
+    player_ids: t.array(t.identity()),
+    player_names: t.array(t.string()),
   }
 );
 
@@ -227,6 +278,8 @@ const spacetimedb = schema({
   snapshot,
   input,
   score,
+  leaderboard,
+  ranked_attempt,
   feedback,
   feedback_recipient_limit,
   squad,
@@ -277,6 +330,46 @@ function teamsIn(ctx: any, code: string) {
   return [...ctx.db.team.code.filter(code)];
 }
 
+function leaderboardRows(ctx: any, challengeId: string, squadSize: number): any[] {
+  return [...ctx.db.leaderboard.challenge_squad.filter([challengeId, squadSize])];
+}
+
+function trimLeaderboard(ctx: any, challengeId: string, squadSize: number) {
+  const overflowIds = overflowLeaderboardIds(leaderboardRows(ctx, challengeId, squadSize), LEADERBOARD_LIMIT);
+  for (const id of overflowIds) ctx.db.leaderboard.id.delete(id);
+}
+
+function insertLeaderboardRun(
+  ctx: any,
+  run: {
+    challenge_id: string;
+    squad_size: number;
+    team_name: string;
+    players: string[];
+    time_ms: bigint;
+    created_at: any;
+  }
+) {
+  ctx.db.leaderboard.insert({ id: 0n, ...run });
+  trimLeaderboard(ctx, run.challenge_id, run.squad_size);
+}
+
+/**
+ * Confirm the host recently published state matching the selected objective.
+ * Physics remains host-simulated, but a bare finish reducer call is insufficient.
+ */
+function hasObjectiveProof(ctx: any, teamId: bigint, challengeId: string, code: string, micros: bigint): boolean {
+  const proof = ctx.db.snapshot.team_id.find(teamId);
+  if (
+    !proof ||
+    proof.code !== code ||
+    micros < proof.recv_micros ||
+    micros - proof.recv_micros > OBJECTIVE_PROOF_MAX_AGE_MICROS
+  ) return false;
+
+  return snapshotMatchesObjective(challengeId, proof);
+}
+
 function earliest(members: any[]): any | null {
   let best: any | null = null;
   for (const m of members) if (!best || m.joined_seq < best.joined_seq) best = m;
@@ -292,6 +385,7 @@ function fixHosts(ctx: any, code: string) {
   for (const tm of teamsIn(ctx, code)) {
     const members = playersIn(ctx, code).filter((p: any) => p.team_id === tm.id);
     if (members.length === 0) {
+      ctx.db.ranked_attempt.team_id.delete(tm.id);
       ctx.db.team.id.delete(tm.id);
       continue;
     }
@@ -317,7 +411,10 @@ function removePlayer(ctx: any, identity: any, micros: bigint) {
 }
 
 function deleteRoom(ctx: any, code: string) {
-  for (const tm of teamsIn(ctx, code)) ctx.db.team.id.delete(tm.id);
+  for (const tm of teamsIn(ctx, code)) {
+    ctx.db.ranked_attempt.team_id.delete(tm.id);
+    ctx.db.team.id.delete(tm.id);
+  }
   for (const s of [...ctx.db.snapshot.code.filter(code)]) ctx.db.snapshot.team_id.delete(s.team_id);
   for (const i of [...ctx.db.input.code.filter(code)]) ctx.db.input.identity.delete(i.identity);
   for (const rt of [...ctx.db.round_timer.iter()]) if (rt.code === code) ctx.db.round_timer.scheduled_id.delete(rt.scheduled_id);
@@ -411,13 +508,29 @@ export const joinRoom = spacetimedb.reducer(
     let tm: any;
     let roles: string[] = [];
     let ready = false;
-    if (solo) {
+    const cap = squadSizeOf(ctx, code);
+    const recoveryAttempt =
+      r.phase === 'countdown' || r.phase === 'playing'
+        ? [...ctx.db.ranked_attempt.code.filter(code)].find(
+            (attempt: any) =>
+              attempt.round === r.round &&
+              attempt.player_ids.some((identity: any) => identity.equals(ctx.sender))
+          )
+        : undefined;
+    const recoveryTeam = recoveryAttempt ? ctx.db.team.id.find(recoveryAttempt.team_id) : undefined;
+    const recoveryMembers = recoveryTeam
+      ? playersIn(ctx, code).filter((member: any) => member.team_id === recoveryTeam.id)
+      : [];
+    if (recoveryTeam && recoveryTeam.code === code && recoveryMembers.length < cap) {
+      tm = recoveryTeam;
+      roles = solo ? [...squadRolesOf(ctx, code)] : pickFreeRole(ctx, code, tm.id);
+      ready = true;
+    } else if (solo) {
       tm = newTeam(ctx, code);
       roles = [...squadRolesOf(ctx, code)];
       ready = true;
     } else {
       // join the team with the most free slots but at least one person, else new team
-      const cap = squadSizeOf(ctx, code);
       const counts = new Map<bigint, number>();
       for (const p of playersIn(ctx, code)) counts.set(p.team_id, (counts.get(p.team_id) ?? 0) + 1);
       const candidates = teamsIn(ctx, code)
@@ -639,6 +752,7 @@ export const startRound = spacetimedb.reducer({ force: t.bool() }, (ctx, { force
   if (r.phase === 'countdown' || r.phase === 'playing') return;
   const members = playersIn(ctx, p.code);
   if (!force && members.some((m: any) => !m.ready)) return;
+  const squadSize = squadSizeOf(ctx, p.code);
 
   // auto-assign uncovered roles per team round-robin
   for (const tm of teamsIn(ctx, p.code)) {
@@ -655,6 +769,20 @@ export const startRound = spacetimedb.reducer({ force: t.bool() }, (ctx, { force
     }
     tm.finish_ms = undefined;
     ctx.db.team.id.update(tm);
+    ctx.db.snapshot.team_id.delete(tm.id);
+
+    const attempt = {
+      team_id: tm.id,
+      code: p.code,
+      round: r.round + 1,
+      squad_size: squadSize,
+      eligible: teamMembers.length === squadSize && teamMembers.every((m: any) => !m.solo),
+      start_host_id: tm.host_id ?? teamMembers[0].identity,
+      player_ids: teamMembers.map((m: any) => m.identity),
+      player_names: teamMembers.map((m: any) => m.name),
+    };
+    if (ctx.db.ranked_attempt.team_id.find(tm.id)) ctx.db.ranked_attempt.team_id.update(attempt);
+    else ctx.db.ranked_attempt.insert(attempt);
   }
 
   const micros = nowMicros(ctx);
@@ -672,28 +800,59 @@ export const startRound = spacetimedb.reducer({ force: t.bool() }, (ctx, { force
 });
 
 /** Called by a team's host when its body reaches the objective. */
-export const finishRun = spacetimedb.reducer({ timeMs: t.u64() }, (ctx, { timeMs }) => {
+export const finishRun = spacetimedb.reducer({ timeMs: t.u64() }, (ctx, { timeMs: _clientTimeMs }) => {
   const p = ctx.db.player.identity.find(ctx.sender);
   if (!p) return;
   const r = ctx.db.room.code.find(p.code);
   if (!r || r.phase !== 'playing') return;
   const tm = ctx.db.team.id.find(p.team_id);
-  if (!tm || tm.host_id == null || !tm.host_id.equals(ctx.sender) || tm.finish_ms != null) return;
+  if (!tm || tm.finish_ms != null) return;
+  const attempt = ctx.db.ranked_attempt.team_id.find(tm.id);
+  const authorizedHost =
+    (tm.host_id != null && tm.host_id.equals(ctx.sender)) ||
+    (attempt != null &&
+      attempt.code === p.code &&
+      attempt.round === r.round &&
+      attempt.start_host_id.equals(ctx.sender));
+  if (!authorizedHost) return;
   const micros = nowMicros(ctx);
-  tm.finish_ms = timeMs;
+  // Keep the reducer argument for rolling client compatibility, but do not use
+  // it for rankings. The server chooses the stored duration from its scheduled
+  // round start and transaction timestamp; the authoritative host still signals
+  // that the objective itself was reached.
+  const authoritativeTimeMs = micros >= r.start_at_micros ? (micros - r.start_at_micros) / 1000n : 0n;
+  tm.finish_ms = authoritativeTimeMs;
   ctx.db.team.id.update(tm);
 
-  // leaderboard entry (server-side, replaces the old /api/leaderboard POST)
-  ctx.db.score.insert({
-    id: 0n,
-    challenge_id: r.challenge_id,
-    team_name: tm.name,
-    players: playersIn(ctx, p.code)
-      .filter((m: any) => m.team_id === tm.id)
-      .map((m: any) => m.name),
-    time_ms: timeMs,
-    created_at: ctx.timestamp,
-  });
+  const teamMembers = playersIn(ctx, p.code)
+    .filter((m: any) => m.team_id === tm.id)
+    .sort((a: any, b: any) => (a.joined_seq < b.joined_seq ? -1 : a.joined_seq > b.joined_seq ? 1 : 0));
+  const squadSize = squadSizeOf(ctx, p.code);
+  const rosterMatches =
+    attempt != null &&
+    attempt.player_ids.length === teamMembers.length &&
+    attempt.player_ids.every((identity: any) =>
+      teamMembers.some((member: any) => member.identity.equals(identity))
+    );
+  const isRankedRun =
+    authoritativeTimeMs >= MIN_RANKED_RUN_MS &&
+    attempt != null &&
+    attempt.code === p.code &&
+    attempt.round === r.round &&
+    attempt.squad_size === squadSize &&
+    attempt.eligible &&
+    rosterMatches &&
+    hasObjectiveProof(ctx, tm.id, r.challenge_id, p.code, micros);
+  if (isRankedRun) {
+    const run = {
+      challenge_id: r.challenge_id,
+      team_name: tm.name,
+      players: attempt.player_names,
+      time_ms: authoritativeTimeMs,
+      created_at: ctx.timestamp,
+    };
+    insertLeaderboardRun(ctx, { ...run, squad_size: squadSize });
+  }
 
   const active = teamsIn(ctx, p.code);
   if (active.every((x: any) => x.finish_ms != null)) {
@@ -779,7 +938,18 @@ export const publishSnapshot = spacetimedb.reducer(
     const p = ctx.db.player.identity.find(ctx.sender);
     if (!p) return;
     const tm = ctx.db.team.id.find(p.team_id);
-    if (!tm || tm.host_id == null || !tm.host_id.equals(ctx.sender)) return;
+    if (!tm) return;
+    const r = ctx.db.room.code.find(p.code);
+    const attempt = ctx.db.ranked_attempt.team_id.find(tm.id);
+    const authorizedHost =
+      (tm.host_id != null && tm.host_id.equals(ctx.sender)) ||
+      (r != null &&
+        (r.phase === 'countdown' || r.phase === 'playing') &&
+        attempt != null &&
+        attempt.code === p.code &&
+        attempt.round === r.round &&
+        attempt.start_host_id.equals(ctx.sender));
+    if (!authorizedHost) return;
     const existing = ctx.db.snapshot.team_id.find(tm.id);
     if (existing) {
       existing.recv_micros = nowMicros(ctx);

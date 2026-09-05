@@ -4,17 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CHALLENGES, ROLES_5, ROLE_INFO, formatTime, type SquadSize } from "@/game/types";
 import { DbConnection, type EventContext } from "@/module_bindings";
+import type { Leaderboard } from "@/module_bindings/types";
 import { loadSpacetimeToken, saveSpacetimeToken, SPACETIMEDB_MODULE, SPACETIMEDB_URI } from "@/game/net";
 import { storedMilliseconds } from "@/game/time";
+import { compareLeaderboardRows, topLeaderboardRows, type LeaderboardRow } from "@/game/leaderboard";
 import FeedbackDialog from "@/components/FeedbackDialog";
-
-interface ScoreRow {
-  id: string;
-  challengeId: string;
-  teamName: string;
-  players: string[];
-  timeMs: number;
-}
 
 function makeCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -25,43 +19,129 @@ function makeCode() {
 
 /** Live leaderboard straight from SpacetimeDB — no API routes involved. */
 function useScoreFeed() {
-  const [rows, setRows] = useState<ScoreRow[]>([]);
+  const [rows, setRows] = useState<LeaderboardRow[]>([]);
   const [online, setOnline] = useState(false);
-  const cache = useRef(new Map<string, { challengeId: string; teamName: string; players: string[]; timeMs: number }>());
+  const cache = useRef(new Map<string, LeaderboardRow>());
 
   useEffect(() => {
     let disposed = false;
+    let connection: DbConnection | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
+    let generation = 0;
+
     const sync = () => {
-      const list = [...cache.current.entries()]
-        .map(([id, r]) => ({ id, ...r }))
-        .sort((a, b) => a.timeMs - b.timeMs)
-        .slice(0, 60);
-      setRows(list);
+      setRows([...cache.current.values()].sort(compareLeaderboardRows));
     };
-    const conn = DbConnection.builder()
-      .withUri(SPACETIMEDB_URI)
-      .withDatabaseName(SPACETIMEDB_MODULE)
-      .withToken(loadSpacetimeToken())
-      .onConnect((c, _identity, token) => {
-        if (disposed) return;
-        saveSpacetimeToken(token);
-        c.subscriptionBuilder()
-          .onApplied(() => !disposed && setOnline(true))
-          .subscribe(["SELECT * FROM score"]);
-        c.db.score.onInsert((_ctx: EventContext, row) => {
-          cache.current.set(row.id.toString(), { challengeId: row.challengeId, teamName: row.teamName, players: row.players, timeMs: storedMilliseconds(row.timeMs) });
+
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer) return;
+      setOnline(false);
+      const delay = Math.min(5_000, 500 * 2 ** reconnectAttempt++);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, delay);
+    };
+
+    const connect = () => {
+      if (disposed) return;
+      const thisGeneration = ++generation;
+      connection = DbConnection.builder()
+        .withUri(SPACETIMEDB_URI)
+        .withDatabaseName(SPACETIMEDB_MODULE)
+        .withToken(loadSpacetimeToken())
+        .onConnect((c, _identity, token) => {
+          if (disposed || thisGeneration !== generation) {
+            c.disconnect();
+            return;
+          }
+          connection = c;
+          saveSpacetimeToken(token);
+          cache.current.clear();
           sync();
-        });
-        c.db.score.onDelete((_ctx: EventContext, row) => {
-          if (cache.current.delete(row.id.toString())) sync();
-        });
-      })
-      .onConnectError(() => !disposed && setOnline(false))
-      .onDisconnect(() => !disposed && setOnline(false))
-      .build();
+
+          const insert = (_ctx: EventContext, row: Leaderboard) => {
+            if (disposed || thisGeneration !== generation) return;
+            const id = row.id.toString();
+            cache.current.set(id, {
+              id,
+              challengeId: row.challengeId,
+              squadSize: row.squadSize === 3 ? 3 : 5,
+              teamName: row.teamName,
+              players: row.players,
+              timeMs: storedMilliseconds(row.timeMs),
+            });
+            sync();
+          };
+          c.db.leaderboard.onInsert(insert);
+          c.db.leaderboard.onDelete((_ctx: EventContext, row: Leaderboard) => {
+            if (disposed || thisGeneration !== generation) return;
+            if (cache.current.delete(row.id.toString())) sync();
+          });
+          c.subscriptionBuilder()
+            .onApplied(() => {
+              if (!disposed && thisGeneration === generation) {
+                reconnectAttempt = 0;
+                setOnline(true);
+              }
+            })
+            .onError(() => {
+              if (!disposed && thisGeneration === generation) c.disconnect();
+            })
+            .subscribe(["SELECT * FROM leaderboard"]);
+        })
+        .onConnectError(() => {
+          if (thisGeneration === generation) {
+            connection = null;
+            scheduleReconnect();
+          }
+        })
+        .onDisconnect(() => {
+          if (thisGeneration !== generation) return;
+          connection = null;
+          scheduleReconnect();
+        })
+        .build();
+    };
+
+    const resume = () => {
+      if (disposed) return;
+      if (connection?.isSocketClosed) {
+        const stale = connection;
+        connection = null;
+        generation += 1;
+        reconnectAttempt = 0;
+        setOnline(false);
+        stale.disconnect();
+        connect();
+        return;
+      }
+      if (!connection) {
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        reconnectAttempt = 0;
+        connect();
+      }
+    };
+    const resumeWhenVisible = () => {
+      if (document.visibilityState === "visible") resume();
+    };
+
+    document.addEventListener("visibilitychange", resumeWhenVisible);
+    window.addEventListener("focus", resume);
+    window.addEventListener("online", resume);
+    window.addEventListener("pageshow", resume);
+    connect();
     return () => {
       disposed = true;
-      conn.disconnect();
+      generation += 1;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      document.removeEventListener("visibilitychange", resumeWhenVisible);
+      window.removeEventListener("focus", resume);
+      window.removeEventListener("online", resume);
+      window.removeEventListener("pageshow", resume);
+      connection?.disconnect();
     };
   }, []);
 
@@ -100,7 +180,7 @@ export default function Home() {
   };
 
   const top = (challengeId: string, n: number) =>
-    rows.filter((r) => r.challengeId === challengeId && (r.players?.length ?? 5) === tab).slice(0, n);
+    topLeaderboardRows(rows, challengeId, tab, n);
 
   return (
     <main className="min-h-dvh bg-[radial-gradient(ellipse_at_top,#1d2a5a_0%,#0b1020_60%)] text-white">
@@ -179,7 +259,7 @@ export default function Home() {
 
           <div className="rounded-3xl bg-white/5 border border-white/10 p-6">
             <div className="flex items-center justify-between gap-2">
-              <div className="text-xs uppercase tracking-widest text-white/60">Challenges & best times</div>
+              <div className="text-xs uppercase tracking-widest text-white/60">Global leaderboard</div>
               <div className="flex items-center gap-1">
                 {([3, 5] as SquadSize[]).map((n) => (
                   <button key={n} onClick={() => setTab(n)} className={`rounded-lg px-2 py-0.5 text-xs font-black ${tab === n ? "bg-[#6ef29a] text-black" : "bg-white/10 text-white/70 hover:bg-white/20"}`}>
@@ -210,7 +290,10 @@ export default function Home() {
                     {top(c.id, 5).map((row, i) => (
                       <div key={row.id} className="flex items-center gap-2 rounded-lg bg-black/30 px-2 py-1 text-xs">
                         <span className="w-4 font-black text-[#ffd23f]">{i + 1}</span>
-                        <span className="flex-1 truncate font-bold">{row.teamName}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate font-bold">{row.teamName}</span>
+                          <span className="block truncate text-[10px] text-white/45">{row.players.join(", ")}</span>
+                        </span>
                         <span className="font-mono">{formatTime(row.timeMs)}</span>
                       </div>
                     ))}

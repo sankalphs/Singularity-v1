@@ -55,6 +55,7 @@ import SubmitFeedbackReducer from "./submit_feedback_reducer";
 // Import all table schema definitions
 import ConnRow from "./conn_table";
 import InputRow from "./input_table";
+import LeaderboardRow from "./leaderboard_table";
 import PlayerRow from "./player_table";
 import RoomRow from "./room_table";
 import ScoreRow from "./score_table";
@@ -94,6 +95,21 @@ const tablesSchema = __schema({
       { name: 'input_identity_key', constraint: 'unique', columns: ['identity'] },
     ],
   }, InputRow),
+  leaderboard: __table({
+    name: 'leaderboard',
+    indexes: [
+      { accessor: 'challenge_squad', name: 'leaderboard_challenge_id_squad_size_idx_btree', algorithm: 'btree', columns: [
+        'challengeId',
+        'squadSize',
+      ] },
+      { accessor: 'id', name: 'leaderboard_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'leaderboard_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, LeaderboardRow),
   player: __table({
     name: 'player',
     indexes: [
