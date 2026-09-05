@@ -1,0 +1,38 @@
+{
+  "name": "singularity2",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "esbuild tests/all.test.mjs --bundle --platform=node --format=esm --outfile=.test-dist/all.test.mjs && node --test --test-isolation=none .test-dist/all.test.mjs",
+    "playtest": "esbuild tests/all.test.mjs --bundle --platform=node --format=esm --outfile=.test-dist/all.test.mjs && node --test --test-isolation=none .test-dist/all.test.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "spacetime:generate": "spacetime generate --lang typescript --out-dir src/module_bindings --module-path server",
+    "spacetime:publish:local": "spacetime publish --module-path server --server local",
+    "spacetime:publish": "spacetime publish --module-path server --server maincloud"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.20.0",
+    "@types/three": "^0.185.4",
+    "next": "16.2.6",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "spacetimedb": "2.10.*",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.1.17",
+    "@types/node": "22.19.15",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "esbuild": "^0.28.2",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.6",
+    "postcss": "8.5.8",
+    "tailwindcss": "4.1.17",
+    "typescript": "5.9.3"
+  }
+}
