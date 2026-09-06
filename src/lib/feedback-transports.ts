@@ -1,4 +1,5 @@
 import {
+  makeFeedbackForwardEmail,
   makeThankYouEmail,
   type FeedbackSubmission,
 } from "@/lib/feedback";
@@ -50,16 +51,17 @@ export async function persistFeedbackRequest(
   }
 }
 
-export type ThankYouResult =
+export type EmailDeliveryResult =
   | { status: "accepted"; emailId: string }
   | { status: "failed"; reason: "provider" | "transport" };
 
-export async function sendFeedbackThankYouRequest(
-  submission: FeedbackSubmission,
+async function sendResendEmailRequest(
+  email: ReturnType<typeof makeThankYouEmail> | ReturnType<typeof makeFeedbackForwardEmail>,
+  idempotencyKey: string,
   config: { apiKey: string; from: string },
-  fetcher: Fetcher = fetch,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-): Promise<ThankYouResult> {
+  fetcher: Fetcher,
+  timeoutMs: number,
+): Promise<EmailDeliveryResult> {
   let response: Response;
   try {
     response = await fetcher(RESEND_EMAILS_URL, {
@@ -67,9 +69,9 @@ export async function sendFeedbackThankYouRequest(
       headers: {
         Authorization: `Bearer ${config.apiKey}`,
         "Content-Type": "application/json",
-        "Idempotency-Key": `feedback-thank-you/${submission.id}`,
+        "Idempotency-Key": idempotencyKey,
       },
-      body: JSON.stringify(makeThankYouEmail(config.from, submission.email)),
+      body: JSON.stringify(email),
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -85,4 +87,35 @@ export async function sendFeedbackThankYouRequest(
   const data = (await response.json().catch(() => null)) as { id?: unknown } | null;
   if (typeof data?.id !== "string" || !data.id) return { status: "failed", reason: "provider" };
   return { status: "accepted", emailId: data.id };
+}
+
+export async function sendFeedbackThankYouRequest(
+  submission: FeedbackSubmission,
+  config: { apiKey: string; from: string },
+  fetcher: Fetcher = fetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<EmailDeliveryResult> {
+  return sendResendEmailRequest(
+    makeThankYouEmail(config.from, submission.email),
+    `feedback-thank-you/${submission.id}`,
+    config,
+    fetcher,
+    timeoutMs,
+  );
+}
+
+export async function sendFeedbackForwardRequest(
+  submission: FeedbackSubmission,
+  inbox: string,
+  config: { apiKey: string; from: string },
+  fetcher: Fetcher = fetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<EmailDeliveryResult> {
+  return sendResendEmailRequest(
+    makeFeedbackForwardEmail(config.from, inbox, submission),
+    `feedback-forward/${submission.id}`,
+    config,
+    fetcher,
+    timeoutMs,
+  );
 }
